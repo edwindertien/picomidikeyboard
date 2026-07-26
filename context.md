@@ -1,144 +1,195 @@
-# Context — Tonewheel Keyboard Scanner
+# Developer Context — pico MIDI keyboard
 
-Handoff document for the key scanner Pico. Read alongside README.md.
-Contains hard-won lessons and known pitfalls.
+Companion to [README.md](README.md), same split as picoST3215: README is
+how to build and use it, this is why it's built the way it is — assumptions
+made without hardware in hand, decisions and their reasoning, and a log of
+what's been found and fixed during bring-up.
 
----
-
-## Project state
-
-Single manual (44 keys, F4–C8) working:
-- Key matrix scan with debounce ✓
-- UART MIDI out on GP0 ✓
-- USB MIDI device ✓ (appears as "Tonewheel Keyboard")
-- Dual UART + USB simultaneous output ✓
-
-Not yet built:
-- Second manual via two 74HC238 decoders
-- Analogue mux (74HC4067) for drawbars/volume/leslie
+**Status as of the last bring-up session:** builds cleanly, boots, OLED
+(128x32 SSD1306), encoder, and USB MIDI/CDC all confirmed working on real
+hardware. Key matrix and CC pots have not yet been tested with anything
+actually wired to them (floating-pin diagnostics only so far) — the
+assumptions below are what to check first once they are.
 
 ---
 
-## Critical lessons learned
+## Architecture
 
-### 1. `Adafruit_USBD_MIDI` must NOT be declared `static` in a header
+`KeyMatrix` is a dumb, mode-agnostic scanner — it only emits raw Make/Break
+events per (row, col, bank), with per-cell debounce. `KeyboardEngine` is
+where DoubleManual vs. Velocity interpretation lives — which note, on/off
+vs. contact-timing velocity. This mirrors the `IServoBus` / `App` split in
+picoST3215: a reusable driver underneath a mode-aware policy layer, kept out
+of both the driver and the UI.
 
-**Symptom:** compiles cleanly, UART MIDI works, but the device never
-appears as a USB MIDI device on the host.
+`CcMux` follows the same split internally: `tick()` is the MIDI-facing path
+(filtered, hysteresis-gated, one channel per call); `readAllRaw()` is a
+separate unfiltered full sweep for diagnostics, sharing the hardware access
+but none of the filter/hysteresis state.
 
-**Cause:** `static` in a header gives each translation unit its own
-private copy of the object. TinyUSB registers the interface in the
-constructor of the instance it sees at link time, but `writePacket()`
-calls go to a different copy that was never registered. The USB
-descriptor never advertises a MIDI interface.
+## Matrix interpretation
 
-**Fix:** declare without `static`:
-```cpp
-Adafruit_USBD_MIDI usb_midi_iface;  // correct
-static Adafruit_USBD_MIDI usb_midi_iface;  // WRONG — silent failure
-```
+The 12x8x2 matrix (12 receive lines, 8 columns per bank via the shared
+74HC238 A/B/C address, 2 banks via GPIO16) is read identically regardless of
+mode:
 
-### 2. `CFG_TUD_MIDI=1` is required in build_flags
+- **DoubleManual** — bank0 and bank1 are two *independent* 96-key sets
+  (`manualA`/`manualB`), each with its own start note, channel, and a fixed
+  velocity (organ contacts are on/off, no velocity electronics — this is
+  deliberately authentic tonewheel-organ behaviour, not a shortcut).
+- **Velocity** — bank0 and bank1 are the top/bottom contact of the *same*
+  96 physical keys. The time between top-Make and bottom-Make maps to
+  velocity via `travelTimeToVelocity()`.
 
-Without it TinyUSB compiles but the MIDI device class is never enabled.
-The device enumerates as USB but presents no MIDI interface.
+The 16 analog CC pots (drawbars, volume, drive, chorus) are **not** sharing
+the key matrix — they're the separate 74HC4067 analog bank, always active
+regardless of `KeyboardMode`. If any drawbars are actually matrix switches
+rather than pots, that's a different shape of change — flag it before
+wiring more of it up.
 
-```ini
-build_flags =
-    -O2
-    -DUSE_TINYUSB
-    -DCFG_TUD_MIDI=1
-```
+## Physical key mapping
 
-### 3. Do not use `MIDI_CREATE_INSTANCE` for USB MIDI on this stack
-
-The fortyseveneffects MIDI library wraps `Adafruit_USBD_MIDI` in a
-`SerialMIDI<>` adapter, producing type
-`midi::MidiInterface<midi::SerialMIDI<Adafruit_USBD_MIDI>>`.
-This causes complex extern declaration problems across header/cpp
-boundaries and is unnecessary. Use `Adafruit_USBD_MIDI` directly with
-`writePacket()` / `readPacket()` instead.
-
-### 4. `keyscan_init()` must be called before `Serial.begin()`
-
-TinyUSB needs to configure the USB device descriptor before the USB
-stack enumerates. Calling `Serial.begin()` first races the stack.
+`KeyboardEngine::keyIndex(row, col)` assumes: the 12 receive lines are one
+chromatic octave (row 0..11 = 12 consecutive semitones), and the 74HC238
+column address selects which octave (col 0..7) — 8 octaves x 12 semitones =
+96 keys per bank:
 
 ```cpp
-void setup() {
-    keyscan_init();      // USB MIDI descriptor set here
-    Serial.begin(115200); // CDC serial after
-    delay(100);
-}
+return col * HW::MATRIX_ROWS + row;   // col = octave, row = semitone
 ```
 
-### 5. No `while (!Serial)` — kills standalone operation
+This replaced an earlier row-major guess (`row * 8 + col`) once it became
+clear 12 receive lines matching one chromatic octave wasn't a coincidence.
+Still assumes row 0 is the lowest semitone and col 0 is the lowest octave —
+if either is reversed on the PCB, this is still the one place to fix it.
+Verify with `dumpStatus()`/the OLED "Last:" readout while pressing keys up a
+single octave in order.
 
-Waiting for CDC connection blocks the scan loop. The keyboard won't
-work without a USB host attached. Just use `delay(100)` after
-`Serial.begin()`.
+## Contact polarity — CHECK THIS
 
-### 6. USB device name
+`KeyMatrix::begin()` configures all 12 row pins `INPUT_PULLUP` and treats a
+closed contact as the row reading LOW (contact shorts the row to GND when
+pressed). If your PCB instead pulls rows high through the contact, flip the
+`== 0` bit test in `KeyMatrix::poll()` and switch `pinMode()` to
+`INPUT`/`INPUT_PULLDOWN` accordingly. Everything downstream (debounce, event
+queue, KeyboardEngine) is polarity-agnostic — one-line change.
 
-Set via `TinyUSBDevice` descriptors, not via `platformio.ini`:
-```cpp
-TinyUSBDevice.setManufacturerDescriptor("Tonewheel");
-TinyUSBDevice.setProductDescriptor("Tonewheel Keyboard");
-```
-Setting `USB_MANUFACTURER` / `USB_PRODUCT` in `build_flags` causes
-redefinition warnings because earlephilhower already defines them.
+## Velocity contact order — CHECK THIS
 
-### 7. GP29 is ADC VREF — do not use as ADC input
+For Velocity mode, the conventional dual-contact keybed geometry is assumed:
 
-Use GP28 (ADC2) for the analogue mux signal input.
+- **Press**: bank0 (top) contact closes first, bank1 (bottom) closes
+  slightly later as the key continues down. Velocity = f(time between them).
+- **Release**: bank1 (bottom) opens first as the key rises, bank0 (top)
+  opens last as the key fully returns to rest. **Note Off is driven
+  entirely by bank0's Break** — bank1's Break is ignored.
 
-### 8. 74HC238 not 74HC138 for strobe decoders
+If your keybed's contact order is reversed, swap the bank checks in
+`KeyboardEngine::handleVelocity()`. Can't really be verified without the
+actual keybed in hand — flag it if the first hardware test shows notes never
+turning on, or turning off before the key is released.
 
-Read lines use INPUT_PULLDOWN; a key press connects the read pin to
-the active strobe = HIGH. The decoder outputs must therefore be
-active-HIGH → use 74HC238. The 74HC138 is active-LOW and would
-require inverting all the logic.
+`releaseVelocity` in `VelocityConfig` is currently unused (Note Off always
+sends velocity 0) — most synths/organs ignore release velocity anyway, but
+the field is there if you want to wire in break-contact release timing
+later.
 
-### 9. Raw USB MIDI packet format
+## Timing constants — tune on hardware
 
-4-byte packets: `[CIN, status, data1, data2]`
-- Note on:  `{ 0x09, 0x90|ch, note, velocity }`
-- Note off: `{ 0x08, 0x80|ch, note, 0x00 }`
-- CC:       `{ 0x0B, 0xB0|ch, cc,   value   }`
+- `KeyMatrix::SETTLE_US = 8` — time after switching the mux address before
+  reading rows. Should comfortably cover 74HC238 propagation delay plus
+  wiring capacitance; raise it if you see spurious reads on columns adjacent
+  to a just-scanned one.
+- `KeyMatrix::DEBOUNCE_US = 4000` (4ms) — standard mechanical debounce
+  window. This is a *ceiling* on velocity resolution too — see below.
+- `VelocityConfig::minTravelMs/maxTravelMs` default to 1ms/60ms — placeholder
+  guesses, not measured. Play a key as hard and as soft as feels realistic,
+  watch the OLED "Last: note vNN" readout, adjust via Settings (persisted,
+  no reflash needed).
 
-Guard all writes with `if (TinyUSBDevice.mounted())`.
+Because `DEBOUNCE_US` delays when a Make event is *accepted* as stable, it
+adds up to 4ms of jitter to the measured top-to-bottom travel time in
+Velocity mode — a real chunk of the default 1-60ms range. If velocity feels
+coarse/steppy on hardware, lowering `DEBOUNCE_US` (more contact-bounce risk)
+or widening the travel-time range are the two levers.
+
+## Hardware MIDI DIN out — mirrors everything
+
+`MidiEngine` sends every Note On/Off/CC over **both** USB MIDI and the
+GPIO12 hardware DIN out, unconditionally — DIN doesn't check `isMounted()`
+since it's a separate physical link with its own consumer. Narrowing this
+(e.g. CC only over USB) is a small change to `MidiEngine::sendCC`/
+`sendNoteOn`/`sendNoteOff` if wanted later.
+
+Serial1 (UART0) is TX-only — RX is parked on GPIO29 purely so
+`Serial1.begin()` doesn't reclaim GPIO1/13/17, which the key/CC matrices
+already own. Nothing is ever read from Serial1.
 
 ---
 
-## Pin allocation (current + planned)
+## Bring-up log
 
-| GPIO | Function | State |
-|------|----------|-------|
-| GP0 | UART TX (MIDI out, Serial1) | active |
-| GP1 | free | — |
-| GP2–GP13 | 12 read inputs (INPUT_PULLDOWN) | active |
-| GP14 | 238-A enable (bottom manual) | planned |
-| GP15 | 238-B enable (top manual) | planned |
-| GP16 | 238 address A0 (shared) | planned |
-| GP17 | 238 address A1 / current strobe 1 | active/planned |
-| GP18 | 238 address A2 / current strobe 2 | active/planned |
-| GP19–GP20 | current strobes 3–4 → free when 238s fitted | active/planned |
-| GP21 | current strobe 5 / mux S0 when 238s fitted | active/planned |
-| GP22 | mux S1 | planned |
-| GP23 | SMPS control — do not use | — |
-| GP24 | VBUS sense — do not use | — |
-| GP25 | LED | — |
-| GP26 | mux S2 | planned |
-| GP27 | mux S3 | planned |
-| GP28 | ADC input from 74HC4067 (ADC2) | planned |
-| GP29 | ADC VREF — do not use as ADC input | — |
+### OLED: SH1107 build targeting an SSD1306 panel (fixed)
+
+First hardware test: OLED completely blank. Root cause — `platformio.ini`
+was still building `DISPLAY_SH1107` (linking the SH110X driver) against an
+actual 128x32 SSD1306 panel; the SH1107 init command sequence doesn't match
+SSD1306 silicon, so nothing displayed at all rather than something garbled.
+Also had the wrong panel size assumed (128x64 instead of the real 128x32).
+
+Fixed: `platformio.ini` now defaults to `DISPLAY_SSD1306` with the matching
+lib_dep; `config.h` corrected to 128x32. Since the original menu/status
+layout was sized for a 64px-tall canvas (4 menu rows + footer + a 14px CC
+bar graph — none of which fits in 32px), added `HW::OLED_CANVAS_H` and a
+compile-time `kCompact` flag in `oled_ui.cpp`: 2 menu rows with no footer
+text on a compact panel (the `>`/`*` selection marker still carries edit
+state), and the status screen drops to two lines with no bar graph. Taller
+panels (SH1107, still selectable via the build flag) keep the original
+4-row/footer/bar-graph layout.
+
+### Key matrix: digitalRead() loop -> gpio_get_all()
+
+Original `KeyMatrix::poll()` did 12 sequential `digitalRead()` calls per
+column (192 per full 16-column scan pass). Each carries real Arduino-wrapper
+overhead (pin table lookup, mode branch) on top of the actual read. Since
+GPIO0-11 map directly to bits 0-11 of the RP2040 SIO input register,
+switched to a single `gpio_get_all()` per column plus a shift/mask per row —
+same pattern as `rcpwm_bus.cpp`'s direct `hardware/pwm.h` use in picoST3215
+(reach for the raw SDK when a hot path's speed actually matters). This
+matters here specifically because scan-pass speed sets Velocity mode's
+timing resolution.
+
+### CC mux: settle time and resolution
+
+Original `CcMux::tick()` used a 15µs settle then a single `analogRead()`
+immediately after switching the 74HC4067 channel — no discard read, so a
+channel could pick up residual charge from whichever pot was selected right
+before it (all 16 pot wipers share one analog bus trace through the mux).
+Also capped at 10-bit ADC resolution despite the RP2040's ADC being native
+12-bit.
+
+Fixed: `readSettled()` now does a throwaway conversion immediately after
+switching, then the real sample; resolution raised to 12-bit; the MIDI-facing
+`tick()` path added a light EMA filter (`FILTER_SHIFT`, default /4) feeding
+the hysteresis gate. `readAllRaw()` was added as a separate unfiltered sweep
+specifically so the `p` diagnostic stream shows genuine pin noise rather than
+something already smoothed away — useful for confirming 16 independently-
+floating channels (vs. crosstalk or a stuck channel) before anything's wired.
 
 ---
 
-## Next steps
+## Known gaps / next steps
 
-1. Build the decoder + mux board
-2. Update `STROBE_PINS[]` to use address+enable pattern for 74HC238s
-3. Add second manual note table (strobes 0–4 of 238-B)
-4. Set `HAS_ADC_MUX 1` and verify drawbar CC output
-5. Wire note overlap between manuals (same read pins, different strobes)
+- **CC-pot assignment isn't in the OLED Settings menu yet.** `ccMap[16]`
+  (which CC number + channel each pot sends) only has the
+  General-MIDI-undefined-block defaults set in `applyDefaultConfig()`
+  (`app.cpp`) — edit that array directly for now. A "select pot, then edit"
+  sub-screen is a natural follow-up once matrix/pot scanning is validated on
+  real hardware.
+- **Disabling a manual mid-hold leaves a stuck note.** `ManualConfig::enabled
+  = false` short-circuits both Make and Break in `handleDoubleManual()`, so
+  a key held down when you disable its manual never gets its Note Off. Low
+  priority, but worth fixing if it bites.
+- **No dedicated mode-toggle shortcut on the Home screen** — reachable via
+  Settings field 0 or the `m` serial command; a direct shortcut might be
+  nicer once this is in daily use rather than on the bench.

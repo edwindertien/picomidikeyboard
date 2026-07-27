@@ -5,13 +5,14 @@
 KeyboardEngine keyboardEngine;
 
 // Physical (row,col) -> logical key index 0..95 within a bank.
-// The 12 receive lines are one chromatic octave (0=row0 .. 11=row11); the
-// 74HC238 column address selects WHICH octave (0..7), giving 8 octaves x
-// 12 semitones = 96 keys per bank. So the index is col*12+row, not
-// row-major — confirmed against the hardware, see KEYBOARD_CONTEXT.md
-// "Physical key mapping".
+// Confirmed against a hardware trace (chromatic run, see context.md
+// "Physical key mapping"): row = semitone, increasing row = increasing
+// pitch, row 0 = C — exactly as assumed. But col (the 74HC238 address,
+// 0..7) runs the OTHER way: the lowest octave sits at the highest column
+// address, not the lowest, so it's inverted here before combining with row.
 uint8_t KeyboardEngine::keyIndex(uint8_t row, uint8_t col) {
-  return (uint8_t)(col * HW::MATRIX_ROWS + row);
+  uint8_t octave = (uint8_t)(HW::MATRIX_COLS_PER_BANK - 1 - col);
+  return (uint8_t)(octave * HW::MATRIX_ROWS + row);
 }
 
 void KeyboardEngine::reset() {

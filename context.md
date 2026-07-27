@@ -1,4 +1,4 @@
-# Developer Context — pico MIDI keyboard
+# Developer Context — Tonewheel Organ Keyboard Controller
 
 Companion to [README.md](README.md), same split as picoST3215: README is
 how to build and use it, this is why it's built the way it is — assumptions
@@ -7,9 +7,10 @@ what's been found and fixed during bring-up.
 
 **Status as of the last bring-up session:** builds cleanly, boots, OLED
 (128x32 SSD1306), encoder, and USB MIDI/CDC all confirmed working on real
-hardware. Key matrix and CC pots have not yet been tested with anything
-actually wired to them (floating-pin diagnostics only so far) — the
-assumptions below are what to check first once they are.
+hardware. Key matrix scanning is confirmed working via a hardware trace
+(pull-down/active-HIGH polarity fix + the column-inversion fix below) on one
+manual (bank1) — the other manual/bank and velocity mode are still
+unverified. CC pots still untested beyond floating-pin diagnostics.
 
 ---
 
@@ -47,32 +48,50 @@ regardless of `KeyboardMode`. If any drawbars are actually matrix switches
 rather than pots, that's a different shape of change — flag it before
 wiring more of it up.
 
-## Physical key mapping
+## Physical key mapping — confirmed via hardware trace
 
-`KeyboardEngine::keyIndex(row, col)` assumes: the 12 receive lines are one
-chromatic octave (row 0..11 = 12 consecutive semitones), and the 74HC238
-column address selects which octave (col 0..7) — 8 octaves x 12 semitones =
-96 keys per bank:
+Confirmed by streaming `k` while playing chromatically from the lowest key
+(an F) to the highest reached (a C) on one manual:
 
-```cpp
-return col * HW::MATRIX_ROWS + row;   // col = octave, row = semitone
-```
+- **Row = semitone, row 0 = C, increasing row = increasing pitch.** Exactly
+  as originally assumed — the trace showed a clean `bit0..bit11` climb in
+  step with each keypress within a stable column, and the very first
+  (partial) column correctly started at bit 5 (F), not bit 0, since the
+  lowest physical key isn't a C.
+- **Column (the 74HC238 address, 0..7) runs the other way.** Pitch went up
+  while the raw column address went *down* (bank1 col 6 -> 5 -> 4 -> 3 -> 2
+  as the run climbed) — the lowest octave sits at the highest column
+  address, not the lowest.
 
-This replaced an earlier row-major guess (`row * 8 + col`) once it became
-clear 12 receive lines matching one chromatic octave wasn't a coincidence.
-Still assumes row 0 is the lowest semitone and col 0 is the lowest octave —
-if either is reversed on the PCB, this is still the one place to fix it.
-Verify with `dumpStatus()`/the OLED "Last:" readout while pressing keys up a
-single octave in order.
+`KeyboardEngine::keyIndex()` now inverts the column before combining it with
+row: `octave = MATRIX_COLS_PER_BANK - 1 - col`, then `octave*12 + row`. Row
+is left untouched.
 
-## Contact polarity — CHECK THIS
+This was diagnosed with the raw `k` stream (see README's Serial Debug
+Commands) rather than guessed — worth reaching for that tool again if a
+similar "which order is X actually in" question comes up (e.g. once the
+second manual/bank is tested, or if velocity-mode contact order turns out
+to need the same kind of check).
 
-`KeyMatrix::begin()` configures all 12 row pins `INPUT_PULLUP` and treats a
-closed contact as the row reading LOW (contact shorts the row to GND when
-pressed). If your PCB instead pulls rows high through the contact, flip the
-`== 0` bit test in `KeyMatrix::poll()` and switch `pinMode()` to
-`INPUT`/`INPUT_PULLDOWN` accordingly. Everything downstream (debounce, event
-queue, KeyboardEngine) is polarity-agnostic — one-line change.
+## Contact polarity — fixed (was: CHECK THIS)
+
+Confirmed on hardware: rows now use `INPUT_PULLDOWN` and a closed contact
+reads HIGH, not the original `INPUT_PULLUP`/LOW assumption. Two things
+combine to explain why:
+
+- The diodes are wired column-side anode, row-side cathode (current flows
+  column -> row when pressed) — the opposite of what was originally assumed.
+- The 74HC238 in use here is the **non-inverting** member of the '138/'238
+  decoder family — its selected output drives HIGH, not LOW like the far
+  more common 74HC138. So the selected column is actually at logic HIGH
+  when addressed.
+
+Those two facts are self-consistent: column HIGH (selected) forward-biases
+the column->row diode against a row idling LOW (pull-down), pulling the row
+HIGH when pressed — clean detection, no crosstalk from the 15 unselected
+(LOW) columns on the same row. Everything downstream of the raw bit read in
+`KeyMatrix::poll()` (debounce, event queue, `KeyboardEngine`) never assumed
+a polarity, so this was a two-line fix (`pinMode` + the bit test).
 
 ## Velocity contact order — CHECK THIS
 
@@ -100,18 +119,41 @@ later.
   reading rows. Should comfortably cover 74HC238 propagation delay plus
   wiring capacitance; raise it if you see spurious reads on columns adjacent
   to a just-scanned one.
-- `KeyMatrix::DEBOUNCE_US = 4000` (4ms) — standard mechanical debounce
-  window. This is a *ceiling* on velocity resolution too — see below.
+- `KeyMatrix::DEBOUNCE_US = 4000` (4ms) — a post-transition **lockout**, not
+  a pre-acceptance wait (see "Debounce: leading vs. trailing edge" below).
+  Since it no longer costs latency, it's safe to raise this further if real
+  contact chatter ever shows up — there's no UX downside to a larger value
+  now, only a slightly longer minimum time between two genuinely separate
+  taps on the same key.
 - `VelocityConfig::minTravelMs/maxTravelMs` default to 1ms/60ms — placeholder
   guesses, not measured. Play a key as hard and as soft as feels realistic,
   watch the OLED "Last: note vNN" readout, adjust via Settings (persisted,
   no reflash needed).
 
-Because `DEBOUNCE_US` delays when a Make event is *accepted* as stable, it
-adds up to 4ms of jitter to the measured top-to-bottom travel time in
-Velocity mode — a real chunk of the default 1-60ms range. If velocity feels
-coarse/steppy on hardware, lowering `DEBOUNCE_US` (more contact-bounce risk)
-or widening the travel-time range are the two levers.
+### Debounce: leading vs. trailing edge
+
+Originally implemented as trailing-edge debounce: wait for the raw signal
+to hold *stable* for `DEBOUNCE_US` before accepting it as a real transition.
+That adds a fixed `DEBOUNCE_US` of latency to every single Make and Break —
+noticeable on a fixed-velocity organ manual, where debounce buys nothing
+(there's no timing to protect) and is pure added delay.
+
+Switched to leading-edge debounce: accept a transition immediately, the
+instant it's first seen, then ignore any further change on that cell for
+`DEBOUNCE_US` afterward. Real contact bounce happens right at the edge, so
+it's still caught by the lockout; a genuine press or release is no longer
+delayed at all — bounded only by the scan pass itself (currently ~150-200µs
+for a full 16-column sweep, not milliseconds). This also removes the
+"up to 4ms of jitter added to Velocity mode's measured travel time" caveat
+that used to be documented here — Make is now accepted at the true first
+contact instant on both the top and bottom contact, so the timing window
+comes out cleaner too.
+
+One edge case worth knowing: a press-and-release faster than `DEBOUNCE_US`
+(sub-4ms) has its release delayed until the lockout expires, rather than
+registering instantly. This is the standard tradeoff of leading-edge
+debounce and not something a human playing a physical keyboard is likely to
+hit in practice.
 
 ## Hardware MIDI DIN out — mirrors everything
 
@@ -124,6 +166,45 @@ since it's a separate physical link with its own consumer. Narrowing this
 Serial1 (UART0) is TX-only — RX is parked on GPIO29 purely so
 `Serial1.begin()` doesn't reclaim GPIO1/13/17, which the key/CC matrices
 already own. Nothing is ever read from Serial1.
+
+---
+
+## Latency
+
+With leading-edge debounce (above), the firmware-side floor for detecting a
+key press is roughly one scan pass — ~150-200µs for the full 16-column
+sweep — plus whatever USB Full Speed (RP2040 has no High Speed capability;
+~1ms frame interval) or the DIN's fixed 31250 baud (~1ms to shift out a
+3-byte message) themselves cost. Those two are protocol/hardware floors,
+not something firmware can improve.
+
+**One real remaining latency source: the OLED render blocks the scan loop.**
+`_display.display()` pushes the full framebuffer over I2C every call. For
+the 128x32 SSD1306 (512 bytes of GDDRAM) at the current 400kHz I2C clock,
+that's roughly **11.5ms** per call — and it happens inline in `App::tick()`,
+throttled to once per `UI::UI_REFRESH_MS` (50ms). So roughly 23% of the time,
+`tick()` is blocked for ~11.5ms rendering the display; a key pressed during
+that window won't be scanned until it finishes. `keyMatrix.poll()` and
+`drainKeyEvents()` (which is what actually sends the MIDI message) both run
+*before* `render()` each tick, so this doesn't delay an already-detected
+note going out — it only delays *detecting* a press that happens to land
+inside that ~11.5ms window.
+
+Options, not yet applied — pick one before I touch this, since OLED and the
+M5Stack encoder share one I2C bus (GPIO20/21) and this is a shared-clock
+change:
+
+- **Raise `HW::I2C_HZ`** (400kHz -> 1MHz, "Fast Mode Plus") — would cut the
+  render block to roughly a quarter, ~3ms. Simplest change, but it's not
+  guaranteed the encoder's I2C-to-I2C bridge tolerates 1MHz reliably — this
+  needs testing on the real bus, not something safe to assume from here.
+- **Reduce render frequency** (raise `UI::UI_REFRESH_MS`) — fewer stalls,
+  same duration each, and a less responsive-feeling status screen.
+- **Partial/windowed display updates** — only push the changed region
+  instead of the whole framebuffer. Real fix, but a bigger lift: the
+  Adafruit driver's base `display()` doesn't expose a dirty-rect API, so
+  this would mean either a different display call pattern or accepting the
+  added complexity.
 
 ---
 

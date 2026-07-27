@@ -9,12 +9,13 @@ void KeyMatrix::begin() {
   pinMode(HW::MUX_SEL_C,    OUTPUT);
   pinMode(HW::MUX_SEL_BANK, OUTPUT);
 
-  // ASSUMPTION: contacts pull the row line to GND when closed, so rows use
-  // the internal pull-up and a closed contact reads LOW. If your PCB wires
-  // it the other way (pull-down + contact to 3V3), flip the "== LOW" test
-  // in poll() below and switch these to INPUT / INPUT_PULLDOWN.
+  // Rows idle LOW via internal pull-down; a closed contact pulls the row
+  // HIGH. This matches the actual hardware: diodes point column->row, and
+  // the 74HC238 (unlike the more common 74HC138) drives its SELECTED output
+  // HIGH rather than LOW — so "selected column HIGH, key closed" needs to
+  // read as the row going HIGH, not LOW. See context.md "Contact polarity".
   for (uint8_t r = 0; r < HW::MATRIX_ROWS; ++r) {
-    pinMode(HW::MATRIX_ROW_PINS[r], INPUT_PULLUP);
+    pinMode(HW::MATRIX_ROW_PINS[r], INPUT_PULLDOWN);
   }
 }
 
@@ -33,20 +34,21 @@ void KeyMatrix::pushEvent(uint8_t row, uint8_t col, uint8_t bank, KeyEventType t
 }
 
 void KeyMatrix::updateCell(uint8_t row, uint8_t col, uint8_t bank, bool raw, uint32_t nowUs) {
-  bool&     last       = _rawLast[row][col][bank];
   bool&     stable     = _stable[row][col][bank];
   uint32_t& lastChange = _lastChange[row][col][bank];
 
-  if (raw != last) {
-    // Raw level just changed (or bounced) — restart the debounce window.
-    last = raw;
-    lastChange = nowUs;
-    return;
-  }
-  if (raw != stable && (nowUs - lastChange) >= DEBOUNCE_US) {
-    stable = raw;
-    pushEvent(row, col, bank, raw ? KeyEventType::Make : KeyEventType::Break, nowUs);
-  }
+  if (raw == stable) return;  // matches the last accepted state — nothing to do
+
+  if ((nowUs - lastChange) < DEBOUNCE_US) return;  // inside the post-transition
+                                                    // lockout — this is bounce, ignore it
+
+  // Leading-edge debounce: accept the transition right now, at the instant
+  // it's first seen, rather than waiting for it to hold stable. This is
+  // what makes a keypress feel instant instead of adding a fixed DEBOUNCE_US
+  // to every note — see context.md "Debounce: leading vs. trailing edge".
+  stable = raw;
+  lastChange = nowUs;
+  pushEvent(row, col, bank, raw ? KeyEventType::Make : KeyEventType::Break, nowUs);
 }
 
 void KeyMatrix::poll() {
@@ -63,7 +65,7 @@ void KeyMatrix::poll() {
       uint32_t allGpio = gpio_get_all();
 
       for (uint8_t row = 0; row < HW::MATRIX_ROWS; ++row) {
-        bool raw = ((allGpio >> HW::MATRIX_ROW_PINS[row]) & 1u) == 0; // closed = LOW
+        bool raw = ((allGpio >> HW::MATRIX_ROW_PINS[row]) & 1u) != 0; // closed = HIGH
         updateCell(row, col, bank, raw, now);
       }
     }
@@ -75,4 +77,20 @@ bool KeyMatrix::popEvent(KeyEvent& out) {
   out = _queue[_qTail];
   _qTail = (uint8_t)((_qTail + 1) % QUEUE_SIZE);
   return true;
+}
+
+void KeyMatrix::readRawColumns(uint16_t* out16) {
+  for (uint8_t bank = 0; bank < HW::MATRIX_BANKS; ++bank) {
+    for (uint8_t col = 0; col < HW::MATRIX_COLS_PER_BANK; ++col) {
+      selectColumn(bank, col);
+      delayMicroseconds(SETTLE_US);
+      uint32_t allGpio = gpio_get_all();
+
+      uint16_t rowBits = 0;
+      for (uint8_t row = 0; row < HW::MATRIX_ROWS; ++row) {
+        if ((allGpio >> HW::MATRIX_ROW_PINS[row]) & 1u) rowBits |= (uint16_t)(1u << row);
+      }
+      out16[bank * HW::MATRIX_COLS_PER_BANK + col] = rowBits;
+    }
+  }
 }

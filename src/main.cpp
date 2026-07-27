@@ -76,7 +76,7 @@ void setup() {
   Serial.println(F("[BOOT] Keyboard controller ready."));
   Serial.print(F("[BOOT] oledOk="));    Serial.print(appState.oledOk ? "YES" : "NO");
   Serial.print(F("  encoderOk="));      Serial.println(appState.encoderOk ? "YES" : "NO");
-  Serial.println(F("[BOOT] Debug commands: 'm'=toggle mode  's'=status dump  'z'=MIDI panic  'p'=toggle raw CC-pot CSV stream"));
+  Serial.println(F("[BOOT] Debug commands: 'm'=toggle mode  's'=status dump  'z'=MIDI panic  'p'=toggle raw CC-pot CSV stream  'k'=toggle raw key-matrix hex stream  'r'=reset config to compiled-in defaults"));
 }
 
 void loop() {
@@ -93,6 +93,10 @@ void loop() {
       Serial.println(F("[MIDI] panic sent"));
     } else if (cmd == 'p' || cmd == 'P') {
       app.toggleCcStream();
+    } else if (cmd == 'k' || cmd == 'K') {
+      app.toggleKeyStream();
+    } else if (cmd == 'r' || cmd == 'R') {
+      app.factoryReset();
     }
   }
 }

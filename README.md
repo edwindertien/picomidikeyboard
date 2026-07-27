@@ -1,4 +1,4 @@
-# Pico MIDI keyboard
+# Tonewheel Organ Keyboard Controller
 
 A Raspberry Pi Pico (RP2040) keyboard/pot scanner for a tonewheel organ
 build. Reads a 12x8x2 contact matrix through two 74HC238 decoders, either as
@@ -168,6 +168,8 @@ Type a single character into the CDC serial terminal — no Enter needed.
 | `s` | Dump current status (mode, USB state, last note, manual/velocity config) |
 | `z` | MIDI panic — all sound/notes off, all channels, both outputs |
 | `p` | Toggle a raw CC-pot CSV stream: all 16 ADC readings (0-4095, unfiltered), one comma-separated line every ~50ms — feed straight into Arduino Serial Plotter or any CSV-over-serial script |
+| `k` | Toggle a raw key-matrix stream: 16 columns x 12-row bitmap, hex, one line every ~100ms, bypasses debounce entirely — useful for verifying physical row/column mapping against real key presses |
+| `r` | Reset config to the compiled-in defaults (`applyDefaultConfig()` in `app.cpp`) and save — use this after editing a default in source, since a saved config on flash otherwise overrides it |
 
 ---
 

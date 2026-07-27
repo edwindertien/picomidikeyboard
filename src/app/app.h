@@ -22,6 +22,8 @@ public:
   // Serial debug commands (see main.cpp loop())
   void toggleMode();
   void toggleCcStream();
+  void toggleKeyStream();
+  void factoryReset();
   void dumpStatus(Stream& out);
 
 private:
@@ -34,6 +36,10 @@ private:
   bool          _ccStreamOn    = false;
   unsigned long _lastCcStreamMs = 0;
   void streamCcIfDue();
+
+  bool          _keyStreamOn    = false;
+  unsigned long _lastKeyStreamMs = 0;
+  void streamKeyIfDue();
 
   void loadPersistedState();     // called from begin() — restore or defaults
   void persistNow();             // immediate LittleFS write (called on Back)

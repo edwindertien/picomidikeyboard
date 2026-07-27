@@ -25,7 +25,9 @@ static void applyDefaultConfig(PersistentConfig& cfg) {
   // upper manual starting an octave+ above it. Adjust to taste in Settings.
   cfg.manualA.startNote = 36;  // C2
   cfg.manualA.channel   = 1;
-  cfg.manualB.startNote = 60;  // C4
+  cfg.manualB.startNote = 12;  // C0 -- was 60 (C4); shifted down 4 octaves
+                                //  so manual B's lowest key (F) reads F1
+                                //  instead of F5, per hardware trace 2026-07
   cfg.manualB.channel   = 2;
 
   cfg.velocity.startNote = 36;
@@ -36,6 +38,14 @@ void App::loadPersistedState() {
   if (!persist.load(_app.cfg)) {
     applyDefaultConfig(_app.cfg);
   }
+}
+
+void App::factoryReset() {
+  applyDefaultConfig(_app.cfg);
+  persistNow();
+  keyboardEngine.reset();
+  _app.menuIndex = 0;
+  Serial.println(F("[RESET] Config overwritten with the compiled-in defaults from applyDefaultConfig() and saved."));
 }
 
 void App::persistNow() {
@@ -59,6 +69,7 @@ void App::tick() {
 
   keyMatrix.poll();
   drainKeyEvents();
+  streamKeyIfDue();
 
   ccMux.tick(_app.cfg.ccMap, _app.ccLive);
   streamCcIfDue();
@@ -128,6 +139,41 @@ void App::streamCcIfDue() {
     Serial.print(raw[i]);
   }
   Serial.println();
+}
+
+void App::toggleKeyStream() {
+  _keyStreamOn = !_keyStreamOn;
+  if (_keyStreamOn) {
+    Serial.println(F("[KEYSTREAM] on — 16 columns x 12-row raw bitmap, hex, ~10Hz"));
+    Serial.println(F("[KEYSTREAM] each line: col00..col15, each a 3-digit hex row mask (bit0=row0..bit11=row11, 1=pressed)"));
+  } else {
+    Serial.println(F("[KEYSTREAM] off"));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Streams the raw (un-debounced) state of all 16 columns as one line every
+// ~100ms — deliberately bypasses KeyMatrix's debounce/event-queue path
+// entirely (KeyMatrix::readRawColumns()), same reasoning as the CC-pot 'p'
+// stream: shows exactly what's on the pins right now, not an interpretation
+// of it. Column c = bank*8+col (0..15); each value is the 12-bit row mask
+// for that column, printed as 3 hex digits.
+// ---------------------------------------------------------------------------
+void App::streamKeyIfDue() {
+  if (!_keyStreamOn) return;
+  unsigned long now = millis();
+  if (now - _lastKeyStreamMs < 100) return;
+  _lastKeyStreamMs = now;
+
+  uint16_t cols[16];
+  keyMatrix.readRawColumns(cols);
+
+  char line[16 * 4 + 1];
+  int pos = 0;
+  for (uint8_t c = 0; c < 16; ++c) {
+    pos += snprintf(line + pos, sizeof(line) - pos, "%s%03X", (c > 0 ? " " : ""), cols[c]);
+  }
+  Serial.println(line);
 }
 
 void App::dumpStatus(Stream& out) {

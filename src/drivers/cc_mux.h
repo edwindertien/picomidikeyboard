@@ -19,10 +19,11 @@ public:
   void begin();
 
   // MIDI-facing: one channel per call. liveOut is updated every call (used
-  // by the OLED status screen), with the filtered/hysteresis-gated 0-127
-  // value; MIDI is only sent for the channel whose turn it is, and only if
-  // it moved past the hysteresis band since the last value actually sent.
-  void tick(const CcSlot* map, uint8_t* liveOut);
+  // by the OLED status screen, read from core1 — see MonitorState), with
+  // the filtered/hysteresis-gated 0-127 value; MIDI is only sent for the
+  // channel whose turn it is, and only if it moved past the hysteresis band
+  // since the last value actually sent.
+  void tick(const CcSlot* map, volatile uint8_t* liveOut);
 
   // Diagnostic: reads all 16 channels fresh, bypassing the EMA filter and
   // hysteresis gate entirely. out16[i] = raw 12-bit ADC count (0-4095) for
@@ -34,7 +35,7 @@ private:
   void selectChannel(uint8_t ch);
   int  readSettled();  // channel must already be selected: settle + discard + real read
 
-  // TUNE ON REAL HARDWARE — starting points only, see KEYBOARD_CONTEXT.md.
+  // TUNE ON REAL HARDWARE — starting points only, see context.md.
   static constexpr uint16_t SWITCH_SETTLE_US = 30;  // 4067 output + shared bus settle
   static constexpr uint8_t  HYSTERESIS       = 2;   // in 0-127 CC units
   static constexpr uint8_t  FILTER_SHIFT     = 2;   // EMA: filtered += (raw-filtered)>>SHIFT

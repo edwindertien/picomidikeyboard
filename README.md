@@ -46,6 +46,9 @@ way, and what's still unverified on real hardware.
   dropped-event counter (auto-adapts to a 128x32 or 128x64 panel)
 - **M5Stack encoder knob** — navigate/edit the Settings menu (rotate =
   move/adjust, short press = edit toggle, long press = back/cancel)
+- **Dual-core**: key scan, CC pots, and MIDI run on core0, uninterrupted by
+  the OLED/encoder (core1) — the display's I2C traffic never blocks a key
+  press from being detected
 - **Persistent configuration** — mode, manual/velocity settings, and CC pot
   assignments saved to LittleFS, restored on boot
 
@@ -181,14 +184,16 @@ picoKeyboard/
 ├── README.md                       This file
 ├── context.md                      Hardware assumptions, decisions, bring-up log
 └── src/
-    ├── main.cpp                    Boot sequence · I2C recovery · serial debug commands
+    ├── main.cpp                    setup()/loop() (core0) · setup1()/loop1() (core1) ·
+    │                                 I2C recovery · serial debug commands
     ├── config.h                    Pin map, matrix/OLED/CC-mux constants
-    ├── app_state.h                 AppState struct (runtime UI/monitoring state)
+    ├── app_state.h                 UiState (core1-only) + MonitorState (core0->core1) + AppState
     ├── model/
     │   └── keyboard_model.h        KeyboardMode, ManualConfig, VelocityConfig, KeyEvent
     ├── app/
     │   ├── app.h                   App class declaration
-    │   └── app.cpp                 Input handling · Settings menu · persistence · tick loop
+    │   └── app.cpp                 tickCore0() (matrix/CC/MIDI/persist) ·
+    │                                 tickCore1() (encoder input · Settings menu · render)
     └── drivers/
         ├── key_matrix.h / .cpp     74HC238 matrix scan + per-cell debounce (raw events only)
         ├── keyboard_engine.h/.cpp  Mode-aware interpretation: raw events -> MIDI notes
@@ -196,6 +201,7 @@ picoKeyboard/
         ├── midi_engine.h / .cpp    USB MIDI+CDC init, hardware DIN mirror
         ├── oled_ui.h / .cpp        OLED rendering (SSD1306/SH1107, compact-layout aware)
         ├── persist.h / .cpp        LittleFS save/load
+        ├── shared_config.h / .cpp  Mutex-guarded PersistentConfig shared across cores (SharedConfig)
         ├── encoder_unit.h / .cpp   M5Stack Unit Encoder I2C driver (reused from picoST3215)
         └── iencoder.h              IEncoder pure-virtual interface (reused from picoST3215)
 ```
@@ -209,7 +215,8 @@ picoKeyboard/
 | OLED blank | Wrong `DISPLAY_xxx` build flag for your actual panel | Check `platformio.ini`; see [context.md](context.md) bring-up log |
 | Encoder unresponsive | I2C not initialised, or wrong address | `s` command shows `encoderOk`; boot log also prints it |
 | No boot messages in terminal | Terminal opened after boot printed them | They only print once, right after boot — reset the board with the terminal already open |
+| Boot log shows "WARNING: core1 init did not finish within 2s" | I2C (OLED/encoder) init on core1 hung or crashed | Check wiring/address on GPIO20/21; see context.md "Dual-core split" |
 | No MIDI/CC traffic from idle pots | Expected — hysteresis gate suppresses unchanged values | Use `p` to see raw values move as you turn a pot |
-| `droppedKeyEvents` rising on Home screen | `App::tick()` not running often enough for the key traffic | Check nothing's blocking `loop()`; see context.md matrix timing notes |
+| `droppedKeyEvents` rising on Home screen | `App::tickCore0()` not running often enough for the key traffic | Check nothing's blocking core0's `loop()`; see context.md matrix timing notes |
 | Notes at unexpected pitches | Physical key mapping or contact polarity assumption doesn't match your PCB | See [context.md](context.md) "Physical key mapping" / "Contact polarity" |
 | Velocity mode: notes never turn on, or turn off before key release | Contact order assumption doesn't match your keybed | See [context.md](context.md) "Velocity contact order" |

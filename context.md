@@ -5,12 +5,21 @@ how to build and use it, this is why it's built the way it is — assumptions
 made without hardware in hand, decisions and their reasoning, and a log of
 what's been found and fixed during bring-up.
 
-**Status as of the last bring-up session:** builds cleanly, boots, OLED
-(128x32 SSD1306), encoder, and USB MIDI/CDC all confirmed working on real
-hardware. Key matrix scanning is confirmed working via a hardware trace
-(pull-down/active-HIGH polarity fix + the column-inversion fix below) on one
-manual (bank1) — the other manual/bank and velocity mode are still
-unverified. CC pots still untested beyond floating-pin diagnostics.
+**Status as of the last bring-up session:** both manuals confirmed working
+in DoubleManual (fixed-velocity organ) mode, on real hardware, over USB
+MIDI. OLED (128x32 SSD1306) and encoder confirmed working. CC pots still
+untested beyond floating-pin diagnostics; Velocity mode untested.
+
+**Not yet tested: the dual-core split** (see "Dual-core split" below) —
+this is a substantial restructure (core0/core1, the `SharedConfig` mutex,
+`setup1()`/`loop1()`) done in response to a real latency finding, but
+written without hardware in hand. First things to check after flashing:
+that the Settings menu still edits and persists correctly (this now crosses
+the core boundary via `SharedConfig` where it didn't before), that mode
+changes made via the menu still take effect on core0 (via the
+`_lastSeenMode` detection in `tickCore0()`), and that the boot sequence's
+core0/core1 handshake actually completes (watch for the
+"WARNING: core1 init did not finish within 2s" message).
 
 ---
 
@@ -27,6 +36,72 @@ of both the driver and the UI.
 (filtered, hysteresis-gated, one channel per call); `readAllRaw()` is a
 separate unfiltered full sweep for diagnostics, sharing the hardware access
 but none of the filter/hysteresis state.
+
+## Dual-core split
+
+Core0 owns everything that isn't I2C: USB MIDI/CDC, the DIN UART, the ADC
+(CC pots), and the digital GPIO matrix scan. Core1 owns I2C exclusively —
+OLED render and the M5Stack encoder (Settings menu input). This is the same
+reasoning as the BTstack/TinyUSB isolation in picoST3215: one peripheral,
+one owning core, no exceptions — here the OLED render's ~11.5ms blocking I2C
+transfer (see "Latency" below) was stalling the key-scan loop, and CC pot
+CC-send goes through the same USB/DIN transport as note messages, so it had
+to stay put on core0 rather than move alongside the "less time-critical"
+OLED/encoder side.
+
+**`App` splits into `tickCore0()` and `tickCore1()`.** `main.cpp` gets
+`setup1()`/`loop1()` (picked up automatically by the earlephilhower core,
+no manual `multicore_launch_core1()` needed) — all I2C init (`Wire`, OLED,
+encoder) moved there from `setup()`.
+
+**What crosses the core boundary, and how:**
+
+- `PersistentConfig` — read every tick by core0 (`KeyboardEngine`, `CcMux`),
+  read/written by core1 (Settings menu). Wrapped in `SharedConfig`, a raw
+  pico-sdk `mutex_t` behind a `SharedConfigGuard` RAII lock. Critical
+  sections are always just a few struct-field reads/writes — never LittleFS
+  I/O, which stays core0-exclusive (`persist.save()`), per the same
+  "LittleFS must never run on core 1" rule as picoST3215.
+- **Mode changes are the one subtlety.** The Settings menu's mode field
+  (core1) only flips the bit under lock and marks the config dirty — it
+  does NOT call `KeyboardEngine::reset()` directly, because `KeyboardEngine`
+  is core0-owned state and core1 must never touch it. Instead, core0's
+  `tickCore0()` compares the snapshotted mode against its own cached
+  `_lastSeenMode` every tick and calls `reset()` itself the instant it
+  detects a change — regardless of whether that change came from the menu
+  or the serial `m` command. One detection path, two possible triggers.
+- **Persistence is no longer tied to "leaving Settings."** `SharedConfig`
+  has a lock-free `volatile bool _dirty` flag — single writer (core1's
+  `markDirty()`), single reader/clearer (core0's `takeDirty()`), so no mutex
+  needed just for that. Core0 checks it every tick and saves within one
+  tick of any edit, whichever core triggered it.
+- `MonitorState` (`lastNote`, `lastVelocity`, `droppedKeyEvents`, `ccLive[]`)
+  — written by core0, read by core1 for the Home-screen status display.
+  Plain `volatile` fields, deliberately NOT mutex-protected: the worst case
+  from a torn/stale read is a single display frame briefly showing a
+  mismatched note+velocity pair or a half-updated CC bar — cosmetic, not a
+  hazard — and locking on every scan-loop update would cost far more than
+  that's worth protecting against.
+- **`setup1()` runs concurrently with `setup()`, not after it — this
+  matters.** Checked against the earlephilhower core's own source: core1 is
+  launched via `multicore_launch_core1()` *before* `setup()` is even called,
+  and the docs confirm setup()/setup1() start at the same time, with only
+  loop()/loop1() waiting for their own core's setup to finish. First draft
+  of this got that backwards and assumed `sharedConfig.begin()` (core0)
+  would always complete before core1 could touch `SharedConfig` — false,
+  and a real race given core0's USB-mount wait can take up to 1.5s while
+  core1's I2C init is comparatively fast. Fixed with a second flag:
+  `setup1()` busy-waits on `g_sharedConfigReady` (set by core0 immediately
+  after `sharedConfig.begin()`, before the slow USB wait) before touching
+  `SharedConfig` at all, or doing anything else.
+- **Serial/CDC stays core0-exclusive, including at boot.** Given the above,
+  a naive "print the boot summary from wherever finishes init first" risks
+  two cores writing to the same USB CDC endpoint at once. Core0's `setup()`
+  waits (with a 2s timeout) on a separate one-time `g_core1Ready` flag, set
+  at the very end of `setup1()`, before printing anything about OLED/encoder
+  status. After that handshake, core1 never touches Serial again, ever —
+  matching "one peripheral, one core" even for something as low-stakes as a
+  debug print.
 
 ## Matrix interpretation
 
@@ -178,33 +253,19 @@ sweep — plus whatever USB Full Speed (RP2040 has no High Speed capability;
 3-byte message) themselves cost. Those two are protocol/hardware floors,
 not something firmware can improve.
 
-**One real remaining latency source: the OLED render blocks the scan loop.**
-`_display.display()` pushes the full framebuffer over I2C every call. For
-the 128x32 SSD1306 (512 bytes of GDDRAM) at the current 400kHz I2C clock,
-that's roughly **11.5ms** per call — and it happens inline in `App::tick()`,
-throttled to once per `UI::UI_REFRESH_MS` (50ms). So roughly 23% of the time,
-`tick()` is blocked for ~11.5ms rendering the display; a key pressed during
-that window won't be scanned until it finishes. `keyMatrix.poll()` and
-`drainKeyEvents()` (which is what actually sends the MIDI message) both run
-*before* `render()` each tick, so this doesn't delay an already-detected
-note going out — it only delays *detecting* a press that happens to land
-inside that ~11.5ms window.
-
-Options, not yet applied — pick one before I touch this, since OLED and the
-M5Stack encoder share one I2C bus (GPIO20/21) and this is a shared-clock
-change:
-
-- **Raise `HW::I2C_HZ`** (400kHz -> 1MHz, "Fast Mode Plus") — would cut the
-  render block to roughly a quarter, ~3ms. Simplest change, but it's not
-  guaranteed the encoder's I2C-to-I2C bridge tolerates 1MHz reliably — this
-  needs testing on the real bus, not something safe to assume from here.
-- **Reduce render frequency** (raise `UI::UI_REFRESH_MS`) — fewer stalls,
-  same duration each, and a less responsive-feeling status screen.
-- **Partial/windowed display updates** — only push the changed region
-  instead of the whole framebuffer. Real fix, but a bigger lift: the
-  Adafruit driver's base `display()` doesn't expose a dirty-rect API, so
-  this would mean either a different display call pattern or accepting the
-  added complexity.
+**Resolved: the OLED render used to block the scan loop.** `_display.display()`
+pushes the full framebuffer over I2C every call — for the 128x32 SSD1306
+(512 bytes of GDDRAM) at 400kHz, that's roughly **11.5ms** per call,
+throttled to once per `UI::UI_REFRESH_MS` (50ms). With everything on one
+core, that meant `tick()` was blocked for ~11.5ms roughly 23% of the time,
+and a key pressed during that window wouldn't be scanned until it finished.
+Moving OLED render (and the encoder, since they share one I2C bus) to core1
+— see "Dual-core split" above — removes this entirely rather than just
+shrinking it: core0's scan loop never touches I2C at all now, so there's no
+render call in its path to block on. The three options considered (raising
+`HW::I2C_HZ`, reducing render frequency, partial display updates) are all
+moot as a result — none of them were as clean a fix as just not sharing the
+loop in the first place.
 
 ---
 

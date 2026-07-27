@@ -4,94 +4,68 @@
 App::App(AppState& state, IEncoder& encoder, OledUi& ui)
     : _app(state), _encoder(encoder), _ui(ui) {}
 
-// ---------------------------------------------------------------------------
-// Default CC assignments: General MIDI's undefined/free controller numbers
-// (3, 9, 14, 15, 20-31) — 16 of them, one per pot. Placeholders — reassign
-// by editing this array (a runtime CC-assignment menu is future work, see
-// KEYBOARD_CONTEXT.md "Known gaps / next steps").
-// ---------------------------------------------------------------------------
-static void applyDefaultConfig(PersistentConfig& cfg) {
-  cfg = PersistentConfig{}; // struct defaults (see keyboard_model.h)
+// =============================================================================
+// core0: matrix scan, CC mux, MIDI, persistence, debug commands
+// =============================================================================
 
-  static const uint8_t kDefaultCc[HW::CC_CHANNELS] = {
-    3, 9, 14, 15, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
-  };
-  for (uint8_t i = 0; i < HW::CC_CHANNELS; ++i) {
-    cfg.ccMap[i].cc      = kDefaultCc[i];
-    cfg.ccMap[i].channel = 1;
-  }
-
-  // Two organ manuals stacked by default: lower manual starting at C2,
-  // upper manual starting an octave+ above it. Adjust to taste in Settings.
-  cfg.manualA.startNote = 36;  // C2
-  cfg.manualA.channel   = 1;
-  cfg.manualB.startNote = 12;  // C0 -- was 60 (C4); shifted down 4 octaves
-                                //  so manual B's lowest key (F) reads F1
-                                //  instead of F5, per hardware trace 2026-07
-  cfg.manualB.channel   = 2;
-
-  cfg.velocity.startNote = 36;
-  cfg.velocity.channel   = 1;
-}
-
-void App::loadPersistedState() {
-  if (!persist.load(_app.cfg)) {
-    applyDefaultConfig(_app.cfg);
-  }
-}
-
-void App::factoryReset() {
-  applyDefaultConfig(_app.cfg);
-  persistNow();
-  keyboardEngine.reset();
-  _app.menuIndex = 0;
-  Serial.println(F("[RESET] Config overwritten with the compiled-in defaults from applyDefaultConfig() and saved."));
+void App::beginCore0() {
+  keyMatrix.begin();
+  ccMux.begin();
 }
 
 void App::persistNow() {
-  persist.save(_app.cfg);
-  _app.cfgDirty = false;
-}
-
-void App::begin() {
-  keyMatrix.begin();
-  ccMux.begin();
-  loadPersistedState();
+  PersistentConfig snap;
+  { SharedConfigGuard g(sharedConfig); snap = *g; }
+  persist.save(snap);
 }
 
 // ---------------------------------------------------------------------------
-// Tick — mirrors picoST3215's App::tick() structure: input, then the two
-// scanning subsystems, then a lazy persist write, then a rate-gated render,
-// then drain incoming USB MIDI. No fixed rate — runs as fast as loop() spins.
+// tickCore0 — takes one snapshot of the shared config per call (a single
+// short-held lock, cheap struct copy), then does everything that isn't I2C:
+// matrix scan, MIDI send, CC pots, persistence. Runs as fast as loop() spins
+// — no fixed rate, same philosophy as picoST3215's App::tick().
 // ---------------------------------------------------------------------------
-void App::tick() {
-  handleInput();
+void App::tickCore0() {
+  PersistentConfig localCfg;
+  {
+    SharedConfigGuard g(sharedConfig);
+    localCfg = *g;
+  }
+  bool needsSave = sharedConfig.takeDirty();
 
-  keyMatrix.poll();
-  drainKeyEvents();
-  streamKeyIfDue();
-
-  ccMux.tick(_app.cfg.ccMap, _app.ccLive);
-  streamCcIfDue();
-
-  if (_app.cfgDirty) {
-    persistNow();
+  // Detect a mode change made by EITHER the serial 'm' command (this core)
+  // or the Settings menu's mode field (core1, via toggleModeFromMenu()) and
+  // react exactly once — KeyboardEngine is core0-owned state, so only core0
+  // ever touches it, regardless of which side actually flipped the mode.
+  if (localCfg.mode != _lastSeenMode) {
+    keyboardEngine.reset();
+    _lastSeenMode = localCfg.mode;
   }
 
-  render();
+  keyMatrix.poll();
+  drainKeyEvents(localCfg);
+  streamKeyIfDue();
+
+  ccMux.tick(localCfg.ccMap, _app.monitor.ccLive);
+  streamCcIfDue();
+
+  if (needsSave) {
+    persist.save(localCfg);
+  }
+
   midiEngine.tick();
 }
 
-void App::drainKeyEvents() {
+void App::drainKeyEvents(const PersistentConfig& cfg) {
   KeyEvent e;
   while (keyMatrix.popEvent(e)) {
     int note = -1, vel = -1;
-    if (keyboardEngine.onEvent(e, _app.cfg, note, vel)) {
-      _app.lastNote     = note;
-      _app.lastVelocity = vel;
+    if (keyboardEngine.onEvent(e, cfg, note, vel)) {
+      _app.monitor.lastNote     = note;
+      _app.monitor.lastVelocity = vel;
     }
   }
-  _app.droppedKeyEvents = keyMatrix.droppedEvents();
+  _app.monitor.droppedKeyEvents = keyMatrix.droppedEvents();
 }
 
 void App::onMidiCC(uint8_t channel, uint8_t cc, uint8_t value) {
@@ -100,14 +74,52 @@ void App::onMidiCC(uint8_t channel, uint8_t cc, uint8_t value) {
 }
 
 void App::toggleMode() {
-  _app.cfg.mode = (_app.cfg.mode == KeyboardMode::DoubleManual)
-                    ? KeyboardMode::Velocity
-                    : KeyboardMode::DoubleManual;
+  KeyboardMode newMode;
+  {
+    SharedConfigGuard g(sharedConfig);
+    g->mode = (g->mode == KeyboardMode::DoubleManual)
+                ? KeyboardMode::Velocity
+                : KeyboardMode::DoubleManual;
+    newMode = g->mode;
+  }
   keyboardEngine.reset();
-  _app.cfgDirty = true;
-  _app.menuIndex = 0; // field count differs per mode — avoid a stale out-of-range index
+  _lastSeenMode = newMode;  // avoid tickCore0() redundantly re-detecting this
+  persistNow();
   Serial.print(F("[MODE] Now: "));
-  Serial.println(_app.cfg.mode == KeyboardMode::DoubleManual ? "DoubleManual" : "Velocity");
+  Serial.println(newMode == KeyboardMode::DoubleManual ? "DoubleManual" : "Velocity");
+}
+
+void App::factoryReset() {
+  { SharedConfigGuard g(sharedConfig); applyDefaultConfig(*g); }
+  persistNow();
+  keyboardEngine.reset();
+  _lastSeenMode = KeyboardMode::DoubleManual;  // matches applyDefaultConfig()'s default
+  _app.ui.menuIndex = 0;
+  Serial.println(F("[RESET] Config overwritten with the compiled-in defaults from applyDefaultConfig() and saved."));
+}
+
+void App::dumpStatus(Stream& out) {
+  PersistentConfig c;
+  { SharedConfigGuard g(sharedConfig); c = *g; }
+
+  out.println(F("--- status ---"));
+  out.print(F("mode: "));
+  out.println(c.mode == KeyboardMode::DoubleManual ? "DoubleManual" : "Velocity");
+  out.print(F("usbMounted: ")); out.println(midiEngine.isMounted() ? "yes" : "no");
+  out.print(F("lastNote: "));   out.println(_app.monitor.lastNote);
+  out.print(F("lastVelocity: "));out.println(_app.monitor.lastVelocity);
+  out.print(F("droppedKeyEvents: ")); out.println(_app.monitor.droppedKeyEvents);
+  out.print(F("manualA: start=")); out.print(c.manualA.startNote);
+  out.print(F(" ch="));  out.print(c.manualA.channel);
+  out.print(F(" en="));  out.println(c.manualA.enabled);
+  out.print(F("manualB: start=")); out.print(c.manualB.startNote);
+  out.print(F(" ch="));  out.print(c.manualB.channel);
+  out.print(F(" en="));  out.println(c.manualB.enabled);
+  out.print(F("velocity: start=")); out.print(c.velocity.startNote);
+  out.print(F(" ch="));  out.print(c.velocity.channel);
+  out.print(F(" minMs=")); out.print(c.velocity.minTravelMs);
+  out.print(F(" maxMs=")); out.print(c.velocity.maxTravelMs);
+  out.print(F(" curve=")); out.println(c.velocity.curveShape);
 }
 
 void App::toggleCcStream() {
@@ -176,30 +188,15 @@ void App::streamKeyIfDue() {
   Serial.println(line);
 }
 
-void App::dumpStatus(Stream& out) {
-  out.println(F("--- status ---"));
-  out.print(F("mode: "));
-  out.println(_app.cfg.mode == KeyboardMode::DoubleManual ? "DoubleManual" : "Velocity");
-  out.print(F("usbMounted: ")); out.println(midiEngine.isMounted() ? "yes" : "no");
-  out.print(F("lastNote: "));   out.println(_app.lastNote);
-  out.print(F("lastVelocity: "));out.println(_app.lastVelocity);
-  out.print(F("droppedKeyEvents: ")); out.println(_app.droppedKeyEvents);
-  out.print(F("manualA: start=")); out.print(_app.cfg.manualA.startNote);
-  out.print(F(" ch="));  out.print(_app.cfg.manualA.channel);
-  out.print(F(" en="));  out.println(_app.cfg.manualA.enabled);
-  out.print(F("manualB: start=")); out.print(_app.cfg.manualB.startNote);
-  out.print(F(" ch="));  out.print(_app.cfg.manualB.channel);
-  out.print(F(" en="));  out.println(_app.cfg.manualB.enabled);
-  out.print(F("velocity: start=")); out.print(_app.cfg.velocity.startNote);
-  out.print(F(" ch="));  out.print(_app.cfg.velocity.channel);
-  out.print(F(" minMs=")); out.print(_app.cfg.velocity.minTravelMs);
-  out.print(F(" maxMs=")); out.print(_app.cfg.velocity.maxTravelMs);
-  out.print(F(" curve=")); out.println(_app.cfg.velocity.curveShape);
+// =============================================================================
+// core1: encoder input + OLED render (the only thing on the I2C bus)
+// =============================================================================
+
+void App::tickCore1() {
+  handleInput();
+  render();
 }
 
-// ---------------------------------------------------------------------------
-// Input
-// ---------------------------------------------------------------------------
 void App::handleInput() {
   _encoder.update();
   int  delta      = _encoder.readSteps();
@@ -208,7 +205,7 @@ void App::handleInput() {
 
   if (delta == 0 && !shortPress && !longPress) return;
 
-  if (_app.screen == ScreenId::Home) {
+  if (_app.ui.screen == ScreenId::Home) {
     handleHomeInput(delta, shortPress, longPress);
   } else {
     handleSettingsInput(delta, shortPress, longPress);
@@ -217,39 +214,42 @@ void App::handleInput() {
 
 void App::handleHomeInput(int /*delta*/, bool shortPress, bool /*longPress*/) {
   if (shortPress) {
-    _app.screen     = ScreenId::Settings;
-    _app.menuIndex  = 0;
-    _app.editing    = false;
+    _app.ui.screen    = ScreenId::Settings;
+    _app.ui.menuIndex = 0;
+    _app.ui.editing   = false;
   }
 }
 
 void App::handleSettingsInput(int delta, bool shortPress, bool longPress) {
-  int fieldCount = settingsFieldCount();
+  KeyboardMode mode;
+  { SharedConfigGuard g(sharedConfig); mode = g->mode; }
+  int fieldCount = settingsFieldCount(mode);
 
   if (longPress) {
-    if (_app.editing) {
-      _app.editing = false;
+    if (_app.ui.editing) {
+      _app.ui.editing = false;
     } else {
-      persistNow();
-      _app.screen = ScreenId::Home;
+      // Persistence is no longer tied to "leaving Settings" — core0 saves
+      // within one tick of any edit, via SharedConfig's dirty flag. This
+      // just navigates back.
+      _app.ui.screen = ScreenId::Home;
     }
     return;
   }
 
   if (shortPress) {
-    _app.editing = !_app.editing;
+    _app.ui.editing = !_app.ui.editing;
     return;
   }
 
   if (delta != 0) {
-    if (_app.editing) {
-      adjustField(_app.menuIndex, delta);
-      _app.cfgDirty = true;
+    if (_app.ui.editing) {
+      adjustField(_app.ui.menuIndex, delta);
     } else {
-      int idx = _app.menuIndex + delta;
+      int idx = _app.ui.menuIndex + delta;
       if (idx < 0) idx = 0;
       if (idx >= fieldCount) idx = fieldCount - 1;
-      _app.menuIndex = idx;
+      _app.ui.menuIndex = idx;
     }
   }
 }
@@ -260,12 +260,12 @@ void App::handleSettingsInput(int delta, bool shortPress, bool longPress) {
 // DoubleManual mode: 0=Mode 1-4=Manual A(start/chan/vel/on) 5-8=Manual B(...)
 // Velocity mode:     0=Mode 1=Start 2=Chan 3=MinMs 4=MaxMs 5=Curve
 //
-// CC-pot assignment (ccMap) is not yet exposed here — see
-// KEYBOARD_CONTEXT.md "Known gaps / next steps". Edit applyDefaultConfig()
-// above (or ccMap directly) to change it for now.
+// CC-pot assignment (ccMap) is not yet exposed here — see context.md
+// "Known gaps / next steps". Edit applyDefaultConfig() (shared_config.cpp)
+// or ccMap directly to change it for now.
 // ---------------------------------------------------------------------------
-int App::settingsFieldCount() const {
-  return (_app.cfg.mode == KeyboardMode::DoubleManual) ? 9 : 6;
+int App::settingsFieldCount(KeyboardMode mode) const {
+  return (mode == KeyboardMode::DoubleManual) ? 9 : 6;
 }
 
 static int clampi(int v, int lo, int hi) {
@@ -274,15 +274,29 @@ static int clampi(int v, int lo, int hi) {
   return v;
 }
 
-void App::adjustField(int index, int delta) {
-  PersistentConfig& c = _app.cfg;
+void App::toggleModeFromMenu() {
+  // Core1's half of a mode toggle: flip the bit under lock and mark dirty,
+  // nothing else. No Serial (core0-exclusive) and no KeyboardEngine::reset()
+  // (core0-owned state) — core0's tickCore0() detects the change itself via
+  // _lastSeenMode and reacts there. See "Dual-core split" in context.md.
+  {
+    SharedConfigGuard g(sharedConfig);
+    g->mode = (g->mode == KeyboardMode::DoubleManual)
+                ? KeyboardMode::Velocity
+                : KeyboardMode::DoubleManual;
+  }
+  sharedConfig.markDirty();
+  _app.ui.menuIndex = 0;  // field count differs per mode — stay on the Mode row
+}
 
+void App::adjustField(int index, int delta) {
   if (index == 0) {
-    // Mode toggle — any nonzero delta flips it. toggleMode() also resets
-    // menuIndex to 0, since the field count differs between modes.
-    toggleMode();
+    if (delta != 0) toggleModeFromMenu();
     return;
   }
+
+  SharedConfigGuard g(sharedConfig);
+  PersistentConfig& c = *g;
 
   if (c.mode == KeyboardMode::DoubleManual) {
     ManualConfig& m = (index <= 4) ? c.manualA : c.manualB;
@@ -308,31 +322,38 @@ void App::adjustField(int index, int delta) {
       }
     }
   }
+
+  sharedConfig.markDirty();
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 void App::render() {
-  if (!_app.oledOk) return;
+  if (!_app.ui.oledOk) return;
   unsigned long now = millis();
   if (now - _lastUiMs < UI::UI_REFRESH_MS) return;
   _lastUiMs = now;
 
-  if (_app.screen == ScreenId::Home) renderHome();
-  else                                renderSettings();
+  if (_app.ui.screen == ScreenId::Home) renderHome();
+  else                                   renderSettings();
 }
 
 void App::renderHome() {
-  _ui.drawStatus(_app.cfg.mode, midiEngine.isMounted(),
-                 _app.lastNote, _app.lastVelocity,
-                 _app.droppedKeyEvents,
-                 _app.ccLive, HW::CC_CHANNELS);
+  KeyboardMode mode;
+  { SharedConfigGuard g(sharedConfig); mode = g->mode; }
+
+  _ui.drawStatus(mode, midiEngine.isMounted(),
+                 _app.monitor.lastNote, _app.monitor.lastVelocity,
+                 _app.monitor.droppedKeyEvents,
+                 _app.monitor.ccLive, HW::CC_CHANNELS);
 }
 
 void App::renderSettings() {
-  PersistentConfig& c = _app.cfg;
-  int count = settingsFieldCount();
+  PersistentConfig c;
+  { SharedConfigGuard g(sharedConfig); c = *g; }
+
+  int count = settingsFieldCount(c.mode);
   char nameBuf[6];
 
   snprintf(_fieldBuf[0], sizeof(_fieldBuf[0]), "Mode:%s",
@@ -363,6 +384,6 @@ void App::renderSettings() {
   const char* items[MAX_SETTINGS_FIELDS];
   for (int i = 0; i < count; ++i) items[i] = _fieldBuf[i];
 
-  _ui.drawMenu("Settings", items, count, _app.menuIndex, _app.editing,
-               _app.editing ? "Short=Done Long=Cancel" : "Short=Edit Long=Back");
+  _ui.drawMenu("Settings", items, count, _app.ui.menuIndex, _app.ui.editing,
+               _app.ui.editing ? "Short=Done Long=Cancel" : "Short=Edit Long=Back");
 }

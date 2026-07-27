@@ -57,7 +57,7 @@ bool KeyboardEngine::handleVelocity(const KeyEvent& e, const PersistentConfig& c
 
   if (e.bank == 0) {
     // Top contact — touched first on the way down, released last on the way
-    // back up. See KEYBOARD_CONTEXT.md "Velocity contact order" for why Note
+    // back up. See context.md "Velocity contact order" for why Note
     // Off is driven from this contact rather than the bottom one.
     if (e.type == KeyEventType::Make) {
       p.topMade  = true;

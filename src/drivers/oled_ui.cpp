@@ -104,7 +104,7 @@ void OledUi::drawStatus(KeyboardMode mode,
                         int lastNote,
                         int lastVelocity,
                         uint32_t droppedKeyEvents,
-                        const uint8_t* ccLive,
+                        const volatile uint8_t* ccLive,
                         uint8_t ccCount) {
   header(mode == KeyboardMode::DoubleManual ? "Double Manual" : "Velocity");
 

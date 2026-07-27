@@ -10,7 +10,7 @@ using MidiCCCallback = void (*)(uint8_t channel, uint8_t cc, uint8_t value);
 // MidiEngine — combined USB (TinyUSB CDC debug port + USB-MIDI device),
 // reused near-verbatim from picoST3215, PLUS a hardware MIDI DIN output on
 // GPIO12 (UART0/Serial1, TX only, 31250 baud) that mirrors every outgoing
-// note/CC message. See KEYBOARD_CONTEXT.md for why DIN mirrors everything.
+// note/CC message. See context.md for why DIN mirrors everything.
 //
 // USB MIDI is driven through the fortyseveneffects MIDI library exactly as
 // in picoST3215 (MIDI_CREATE_INSTANCE trampoline pattern); DIN bytes are

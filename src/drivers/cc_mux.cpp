@@ -36,7 +36,7 @@ int CcMux::readSettled() {
   return analogRead(HW::CC_MUX_ADC_PIN); // 0-4095
 }
 
-void CcMux::tick(const CcSlot* map, uint8_t* liveOut) {
+void CcMux::tick(const CcSlot* map, volatile uint8_t* liveOut) {
   selectChannel(_channel);
   int raw = readSettled();
 

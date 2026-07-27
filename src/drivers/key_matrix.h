@@ -12,12 +12,12 @@
 // lives one layer up in KeyboardEngine. This mirrors the IServoBus split in
 // picoST3215: a dumb, reusable driver underneath a mode-aware App layer.
 //
-// poll() is non-blocking and cheap — call it every App::tick() iteration,
-// same "just as fast as possible" philosophy as picoST3215's App::tick().
-// A full 16-column x 12-row pass costs roughly
+// poll() is non-blocking and cheap — call it every App::tickCore0()
+// iteration, same "just as fast as possible" philosophy as picoST3215's
+// App::tick(). A full 16-column x 12-row pass costs roughly
 // 16 * (SETTLE_US + ~12 digitalReads) — on the order of a few hundred
 // microseconds, which is what gives Velocity mode its contact-timing
-// resolution (see KEYBOARD_CONTEXT.md).
+// resolution (see context.md).
 // ---------------------------------------------------------------------------
 class KeyMatrix {
 public:
@@ -36,7 +36,7 @@ public:
 
   // Count of events silently dropped because the queue was full (diagnostic
   // only — should stay at 0 in normal operation; a rising count means
-  // App::tick() isn't being called often enough relative to key traffic).
+  // App::tickCore0() isn't being called often enough relative to key traffic).
   uint32_t droppedEvents() const { return _dropped; }
 
 private:

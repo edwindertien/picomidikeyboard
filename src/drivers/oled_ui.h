@@ -45,7 +45,7 @@ public:
                    int lastNote,
                    int lastVelocity,
                    uint32_t droppedKeyEvents,
-                   const uint8_t* ccLive,
+                   const volatile uint8_t* ccLive,
                    uint8_t ccCount);
 
 private:

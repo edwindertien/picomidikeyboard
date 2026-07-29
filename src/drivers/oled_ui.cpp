@@ -104,34 +104,46 @@ void OledUi::drawStatus(KeyboardMode mode,
                         int lastNote,
                         int lastVelocity,
                         uint32_t droppedKeyEvents,
+                        bool midiActive,
                         const volatile uint8_t* ccLive,
                         uint8_t ccCount) {
-  header(mode == KeyboardMode::DoubleManual ? "Double Manual" : "Velocity");
+  // Custom top row instead of the shared header() — same divider styling,
+  // but packs in the last note sent and a MIDI activity indicator alongside
+  // the mode, which header()/drawMenu()'s Settings screens don't need.
+  // Abbreviated mode text (matching the Settings menu's "DblMan"/"Veloc")
+  // on BOTH panel sizes now, not just the compact one — the row is 128px
+  // wide either way, only the panel *height* differs, so the same space
+  // budget applies to fit note+indicator in.
+  _display.clearDisplay();
+  _display.setTextSize(1);
 
-  char nameBuf[6];
+  _display.setCursor(0, 0);
+  _display.print(mode == KeyboardMode::DoubleManual ? "DblMan" : "Veloc");
+
+  if (lastNote >= 0) {
+    char nameBuf[6];
+    midiNoteName((uint8_t)lastNote, nameBuf, sizeof(nameBuf));
+    _display.setCursor(48, 0);
+    _display.print(nameBuf);
+  }
+
+  // MIDI activity blink, top-right corner: filled when a message went out
+  // recently (see MidiEngine::recentlyActive()), outlined (but still
+  // visible) when idle, so there's always something to glance at even with
+  // nothing playing.
+  if (midiActive) {
+    _display.fillRect(121, 1, 5, 5, _OLED_COLOR_ON);
+  } else {
+    _display.drawRect(121, 1, 5, 5, _OLED_COLOR_ON);
+  }
+
+  _display.drawLine(0, 9, 127, 9, _OLED_COLOR_ON);
+
   if (kCompact) {
-    // 32px panel: two content rows, no room for a CC bar graph.
-    _display.setCursor(0, 11);
-    _display.print("USB:");
-    _display.print(usbMounted ? "up" : "---");
-    if (droppedKeyEvents > 0) {
-      _display.print(" Drop:");
-      _display.print(droppedKeyEvents);
-    }
-
-    _display.setCursor(0, 21);
-    if (lastNote >= 0) {
-      midiNoteName((uint8_t)lastNote, nameBuf, sizeof(nameBuf));
-      _display.print("Last:");
-      _display.print(nameBuf);
-      if (lastVelocity >= 0) {
-        _display.print(" v");
-        _display.print(lastVelocity);
-      }
-    } else {
-      _display.print("Last: --");
-    }
-
+    // 32px panel: no room for USB/dropped-event text as well — see
+    // context.md "Drawbar visualization" for the tradeoff (still available
+    // via the 's' serial command).
+    drawDrawbarTracks(0, 11, 128, 20, ccLive, ccCount);
     _display.display();
     return;
   }
@@ -146,34 +158,42 @@ void OledUi::drawStatus(KeyboardMode mode,
     _display.print(droppedKeyEvents);
   }
 
-  _display.setCursor(0, 22);
-  if (lastNote >= 0) {
-    midiNoteName((uint8_t)lastNote, nameBuf, sizeof(nameBuf));
-    _display.print("Last: ");
-    _display.print(nameBuf);
-    if (lastVelocity >= 0) {
-      _display.print(" v");
-      _display.print(lastVelocity);
-    }
-  } else {
-    _display.print("Last: --");
+  if (lastNote >= 0 && lastVelocity >= 0) {
+    _display.setCursor(0, 22);
+    _display.print("Vel: ");
+    _display.print(lastVelocity);
   }
 
-  // Compact 16-channel CC bar graph, bottom-left, 8px per bar x 16 = 128px.
-  // Only fits panels with a 64px-tall canvas or taller.
-  if (ccLive && ccCount > 0) {
-    const int barsY = 54;      // baseline
-    const int barsH = 14;      // max bar height
-    const int barW  = 7;
-    for (uint8_t i = 0; i < ccCount && i < 16; ++i) {
-      int h = (int)((uint32_t)ccLive[i] * barsH / 127);
-      int x = i * (barW + 1);
-      _display.drawRect(x, barsY - barsH, barW, barsH, _OLED_COLOR_ON);
-      if (h > 0) {
-        _display.fillRect(x, barsY - h, barW, h, _OLED_COLOR_ON);
-      }
-    }
-  }
+  drawDrawbarTracks(0, 40, 128, 22, ccLive, ccCount);
 
   _display.display();
+}
+
+void OledUi::drawDrawbarTracks(int x0, int y0, int w, int h,
+                               const volatile uint8_t* values, uint8_t count) {
+  if (!values || count == 0 || w <= 0 || h <= 1) return;
+
+  int pitch = w / count;
+  int barW  = (pitch > 3) ? (pitch - 3) : pitch;  // small gap between tracks
+  if (barW < 1) barW = 1;
+
+  for (uint8_t i = 0; i < count; ++i) {
+    // Logical drawbar position i (0-indexed, i=0 = "drawbar 1") is
+    // physically wired to mux channel DRAWBAR_MUX_CHANNEL[i], not channel i
+    // directly -- see config.h and context.md "Drawbar remap".
+    uint8_t muxCh = (i < HW::DRAWBAR_COUNT) ? HW::DRAWBAR_MUX_CHANNEL[i] : i;
+    uint8_t value = values[muxCh];
+
+    int tx = x0 + i * pitch;
+    // Full-height outline so the whole slot is visible regardless of
+    // current position (matches a real drawbar's physical travel range).
+    _display.drawRect(tx, y0, barW, h, _OLED_COLOR_ON);
+
+    // Filled from the TOP down — 0 = no fill (bar pushed all the way in,
+    // silent), 127 = filled the full track height (bar fully pulled out).
+    int filled = (int)((uint32_t)value * h / 127);
+    if (filled > 0) {
+      _display.fillRect(tx, y0, barW, filled, _OLED_COLOR_ON);
+    }
+  }
 }

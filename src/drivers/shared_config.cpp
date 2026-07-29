@@ -3,20 +3,27 @@
 SharedConfig sharedConfig;
 
 // ---------------------------------------------------------------------------
-// Default CC assignments: General MIDI's undefined/free controller numbers
-// (3, 9, 14, 15, 20-31) — 16 of them, one per pot. Placeholders — reassign
-// by editing this array (a runtime CC-assignment menu is future work, see
-// context.md "Known gaps / next steps").
-//
-// Moved here from app.cpp's applyDefaultConfig() as part of the dual-core
-// split — config defaults belong with config management, not the App/UI
-// layer. See context.md "Dual-core split".
+// Default CC assignments. The first HW::DRAWBAR_COUNT (9) channels are
+// wired as drawbars, but NOT in mux-channel order — see config.h's
+// DRAWBAR_MUX_CHANNEL for the physical wiring. This array is indexed by mux
+// channel (matching CcMux::tick()'s scan order), and its values are derived
+// FROM DRAWBAR_MUX_CHANNEL so a mux channel always sends the CC number for
+// whichever logical drawbar position it actually carries (12 = drawbar 1,
+// ..., 20 = drawbar 9) — not a GM-defined meaning (CC12/13 are technically
+// GM "Effect Control 1/2", but that's irrelevant here — this is a custom
+// controller, not talking to a GM-compliant synth). The remaining 7
+// channels (volume/drive/chorus/etc., not yet wired) use General MIDI's
+// undefined/free block (21-27), shifted past the drawbar range so nothing
+// collides. Reassign by editing this array (a runtime CC-assignment menu is
+// future work, see context.md "Known gaps / next steps").
 // ---------------------------------------------------------------------------
 void applyDefaultConfig(PersistentConfig& cfg) {
   cfg = PersistentConfig{}; // struct defaults (see keyboard_model.h)
 
   static const uint8_t kDefaultCc[HW::CC_CHANNELS] = {
-    3, 9, 14, 15, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+    13, 16, 19, 12, 14, 18, 20, 17, 15,   // drawbars, indexed by MUX CHANNEL
+                                           // (not logical position) — see above
+    21, 22, 23, 24, 25, 26, 27            // volume/drive/chorus/etc. (unwired)
   };
   for (uint8_t i = 0; i < HW::CC_CHANNELS; ++i) {
     cfg.ccMap[i].cc      = kDefaultCc[i];

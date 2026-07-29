@@ -42,8 +42,12 @@ way, and what's still unverified on real hardware.
   generate zero MIDI traffic
 - **Combined USB MIDI + CDC debug port**, plus a hardware MIDI DIN output on
   GPIO12 that mirrors everything sent over USB
-- **OLED status screen** — mode, USB link state, last note/velocity played,
-  dropped-event counter (auto-adapts to a 128x32 or 128x64 panel)
+- **OLED status screen** — top row (both panel sizes): mode, last note
+  sent, and a MIDI activity blink indicator (top-right). Below that: on the
+  128x32 panel, a live Hammond-style drawbar visualization (top-down fill,
+  matching the physical pull direction) for the first `HW::DRAWBAR_COUNT`
+  CC channels; on a taller (128x64) panel, USB link state/dropped-event
+  count/velocity plus the same drawbar visualization
 - **M5Stack encoder knob** — navigate/edit the Settings menu (rotate =
   move/adjust, short press = edit toggle, long press = back/cancel)
 - **Dual-core**: key scan, CC pots, and MIDI run on core0, uninterrupted by
@@ -150,10 +154,17 @@ isn't in this menu yet — see [context.md](context.md) "Known gaps".
   this mode by design.
 - **Velocity mode:** computed from top-to-bottom contact travel time, mapped
   through `MinMs`/`MaxMs`/`Curve`.
-- **CC pots:** default assignments use General MIDI's undefined/free
-  controller numbers — CC 3, 9, 14, 15, and 20-31 (16 total, one per pot),
-  all on channel 1. Edit `applyDefaultConfig()` in `app.cpp` to change them
-  (see context.md for why this isn't a menu yet).
+- **CC pots:** the first `HW::DRAWBAR_COUNT` (9) logical positions are
+  drawbars and default to CC 12-20 (drawbar 1 -> CC12, ..., drawbar 9 ->
+  CC20), channel 1 — the de facto convention several tonewheel-organ
+  plugins expect. Physical wiring doesn't match mux-channel order (see
+  `HW::DRAWBAR_MUX_CHANNEL` in `config.h`), so display position and CC
+  number both go through that remap table and stay in agreement regardless
+  of which mux input a given drawbar is actually soldered to. The remaining
+  7 channels (volume/drive/chorus/etc., not yet wired) default to General
+  MIDI's undefined block (21-27), channel 1. Edit `applyDefaultConfig()` in
+  `src/drivers/shared_config.cpp` to change any of this (see context.md for
+  why this isn't a menu yet).
 - **Outputs:** USB MIDI and the GPIO12 hardware MIDI DIN out both receive
   every message — DIN doesn't depend on USB being connected.
 - **Panic:** the `z` serial command sends CC 120 (all sound off) + CC 123

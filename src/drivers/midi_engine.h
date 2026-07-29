@@ -29,6 +29,15 @@ public:
   void sendCC     (uint8_t cc, uint8_t value, uint8_t channel);
   void panic();      // all-notes-off + all-sound-off on every channel
 
+  // True if any message was sent within the last windowMs -- read-only,
+  // safe to call from core1 (Home screen's activity blink) for the same
+  // reason isMounted() is: no multi-step state involved, just a plain
+  // volatile timestamp compare, no risk of corrupting the actual USB/DIN
+  // send path.
+  bool recentlyActive(uint32_t windowMs) const {
+    return (millis() - _lastActivityMs) < windowMs;
+  }
+
   void setOnCC(MidiCCCallback cb) { _onCC = cb; }
 
   // Public: accessed by the MIDI_CREATE_INSTANCE macro and the CC trampoline
@@ -37,6 +46,8 @@ public:
 
 private:
   void dinWrite3(uint8_t status, uint8_t d1, uint8_t d2);
+  void noteActivity() { _lastActivityMs = millis(); }
+  volatile uint32_t _lastActivityMs = 0;
 };
 
 extern MidiEngine midiEngine;

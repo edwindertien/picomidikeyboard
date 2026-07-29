@@ -120,6 +120,13 @@ void App::dumpStatus(Stream& out) {
   out.print(F(" minMs=")); out.print(c.velocity.minTravelMs);
   out.print(F(" maxMs=")); out.print(c.velocity.maxTravelMs);
   out.print(F(" curve=")); out.println(c.velocity.curveShape);
+
+  out.println(F("ccMap (indexed by mux channel, not logical drawbar position):"));
+  for (uint8_t ch = 0; ch < HW::CC_CHANNELS; ++ch) {
+    out.print(F("  mux"));  out.print(ch);
+    out.print(F(": cc="));  out.print(c.ccMap[ch].cc);
+    out.print(F(" chan=")); out.println(c.ccMap[ch].channel);
+  }
 }
 
 void App::toggleCcStream() {
@@ -346,7 +353,8 @@ void App::renderHome() {
   _ui.drawStatus(mode, midiEngine.isMounted(),
                  _app.monitor.lastNote, _app.monitor.lastVelocity,
                  _app.monitor.droppedKeyEvents,
-                 _app.monitor.ccLive, HW::CC_CHANNELS);
+                 midiEngine.recentlyActive(UI::MIDI_BLINK_WINDOW_MS),
+                 _app.monitor.ccLive, HW::DRAWBAR_COUNT);
 }
 
 void App::renderSettings() {

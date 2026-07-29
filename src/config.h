@@ -83,6 +83,24 @@ namespace HW {
   static constexpr uint8_t CC_MUX_SEL_S3  = 22;
   static constexpr uint8_t CC_MUX_ADC_PIN = 26;   // ADC0
   static constexpr uint8_t CC_CHANNELS    = 16;
+
+  // Of the 16 CC pot channels, the first N are wired as drawbars (mux
+  // inputs 0..N-1) — used by the Home screen's drawbar visualization
+  // (OledUi::drawDrawbarTracks()). Update this if the physical wiring
+  // changes; see context.md "Drawbar visualization".
+  static constexpr uint8_t DRAWBAR_COUNT = 9;
+
+  // Logical drawbar position i (0-indexed, i=0 is "drawbar 1"/16') is
+  // physically wired to mux channel DRAWBAR_MUX_CHANNEL[i] -- NOT channel i
+  // directly. Confirmed against the real wiring (2026-07): drawbar 1->mux3,
+  // 2->mux0, 3->mux4, 4->mux8, 5->mux1, 6->mux7, 7->mux5, 8->mux2, 9->mux6.
+  // Used both for display order (OledUi::drawDrawbarTracks()) and for the
+  // default CC assignment (shared_config.cpp's kDefaultCc, which is indexed
+  // by mux channel and must agree with this table) -- see context.md
+  // "Drawbar remap" for the derivation.
+  static constexpr uint8_t DRAWBAR_MUX_CHANNEL[DRAWBAR_COUNT] = {
+    3, 0, 4, 8, 1, 7, 5, 2, 6
+  };
 }
 
 // =============================================================================
@@ -90,4 +108,11 @@ namespace HW {
 // =============================================================================
 namespace UI {
   static constexpr uint16_t UI_REFRESH_MS = 50;
+
+  // How long the Home screen's MIDI activity indicator stays "on" after a
+  // message is sent. Deliberately longer than UI_REFRESH_MS so a single,
+  // isolated MIDI message is very likely to show as "on" for at least one
+  // render frame, even in the worst-case timing alignment between when the
+  // message was sent and when render() next samples it.
+  static constexpr uint16_t MIDI_BLINK_WINDOW_MS = 80;
 }

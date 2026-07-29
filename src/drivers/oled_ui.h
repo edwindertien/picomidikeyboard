@@ -45,6 +45,7 @@ public:
                    int lastNote,
                    int lastVelocity,
                    uint32_t droppedKeyEvents,
+                   bool midiActive,
                    const volatile uint8_t* ccLive,
                    uint8_t ccCount);
 
@@ -56,6 +57,14 @@ private:
   void header(const char* title);
   void footer(const char* text);
   void drawSelectionMarker(int rowY, bool editing);
+
+  // Hammond-style drawbar tracks within [x0,x0+w) x [y0,y0+h): each track
+  // is an outlined slot, filled from the TOP down proportional to value
+  // (0 = empty/silent, 127 = fully filled) — matching a drawbar pulled out
+  // from its rest position, not a bottom-up volume-meter fill. See
+  // context.md "Drawbar visualization".
+  void drawDrawbarTracks(int x0, int y0, int w, int h,
+                         const volatile uint8_t* values, uint8_t count);
 };
 
 // Formats a MIDI note number as e.g. "C#4" (60 = C4 / middle C).

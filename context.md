@@ -269,6 +269,88 @@ loop in the first place.
 
 ---
 
+## Drawbar visualization
+
+The Home screen shows the first `HW::DRAWBAR_COUNT` (9) CC-pot channels as
+Hammond-style vertical tracks — an outlined slot per drawbar, filled from
+the **top down** in proportion to value (0 = empty/silent, matching the bar
+pushed all the way in; 127 = filled the full track height, matching it
+pulled all the way out). This is deliberately the opposite of a typical
+bottom-up volume-meter fill, matching the actual physical action ("you pull
+the bars" down/out to increase them) rather than a generic bar-chart
+convention.
+
+`OledUi::drawDrawbarTracks()` is a from-scratch helper (`drawStatus()`'s
+CC section used to be a generic bottom-up 16-channel bar graph) — it takes
+a bounding box and count, so it's reused for both panel sizes with
+different boxes: the 128x32 panel gives it the whole content area below the
+header row. The 128x64 panel keeps USB/dropped-event/velocity text and
+gives the drawbars a shorter strip below it.
+
+**Which channels are "drawbars" is a hardcoded assumption, not derived from
+anything in `CcSlot`.** `HW::DRAWBAR_COUNT = 9` in `config.h` just says
+"the first N logical positions are drawbars" — there's no per-channel
+metadata distinguishing a drawbar pot from a volume/drive/chorus pot. A more
+general "channel type" tag on `CcSlot` would remove this assumption but
+felt like over-engineering for what's being asked right now — worth
+reconsidering if the physical assignment turns out to change often.
+
+### Drawbar remap: physical wiring doesn't match mux-channel order
+
+The 9 drawbars aren't wired to mux channels 0-8 in order — confirmed
+against the actual hardware (2026-07): drawbar 1 (16') is physically on mux
+channel 3, drawbar 2 on channel 0, and so on, a full derangement (no
+drawbar sits on its "obvious" channel). `HW::DRAWBAR_MUX_CHANNEL[9]` in
+`config.h` is the correction table, indexed by logical position (0 =
+drawbar 1) giving the mux channel that actually carries it:
+`{3, 0, 4, 8, 1, 7, 5, 2, 6}`.
+
+This table is used in two places that both have to agree, for two different
+reasons:
+
+- **Display** (`OledUi::drawDrawbarTracks()`) reads
+  `values[DRAWBAR_MUX_CHANNEL[i]]` for logical position `i`, instead of
+  `values[i]` directly — this is a genuine runtime indirection, since
+  `ccLive[]` is filled in mux-scan order (a hardware fact, not something
+  software controls) and has to be permuted for the display to show
+  physical drawbar `i+1` at screen position `i+1`.
+- **CC assignment** doesn't need a runtime indirection — `shared_config.cpp`'s
+  `kDefaultCc[]` is indexed by mux channel (matching how `CcMux::tick()`
+  looks up `map[_channel]`), and its *values* are simply computed so that
+  whichever mux channel carries logical drawbar `i+1` sends CC `12+i`. The
+  two tables were derived together and cross-checked against each other —
+  if you ever touch one, recheck the other, or the display and the CC
+  stream for the same physical drawbar will disagree.
+
+### CC assignment and the top-row header
+
+Default CC numbers for the drawbars are 12-20 (one per logical position,
+per your request) — chosen to match whatever convention your target
+plugin/instrument expects, not a General MIDI meaning (CC12/13 are
+technically GM "Effect Control 1/2", but that's irrelevant for a custom
+controller talking to a specific plugin). The remaining 7 (unwired)
+channels shifted to CC 21-27 so nothing collides with the drawbar range.
+
+`drawStatus()`'s top row was rebuilt to pack in more than just the mode:
+abbreviated mode text (`DblMan`/`Veloc`, matching the Settings menu's
+abbreviations — now used on **both** panel sizes, since the row is 128px
+wide either way and only panel *height* differs), the last note sent, and a
+MIDI activity indicator (small square, top-right corner) that fills solid
+when a message went out within `UI::MIDI_BLINK_WINDOW_MS` (80ms) and shows
+as an outline when idle. `MidiEngine::recentlyActive()` backs this — a
+`volatile uint32_t` timestamp updated by every `sendNoteOn`/`sendNoteOff`/
+`sendCC`/`panic()` call (core0), read by core1's render — same single-
+writer/single-reader reasoning as the rest of `MonitorState`, and the same
+"simple read-only status query" precedent as `isMounted()` already being
+called from core1. The 80ms window is deliberately longer than
+`UI::UI_REFRESH_MS` (50ms) so a single, isolated MIDI message is very likely
+to show as "on" for at least one render frame, even in the worst-case
+timing alignment between when it's sent and when render() next samples it.
+One tiny, harmless quirk: `_lastActivityMs` starts at 0, so the indicator
+reads as "recently active" for the first ~80ms after boot regardless of
+whether anything's actually been sent — never actually visible in practice
+since OLED/I2C init takes longer than that anyway.
+
 ## Bring-up log
 
 ### OLED: SH1107 build targeting an SSD1306 panel (fixed)

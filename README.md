@@ -1,5 +1,9 @@
 # Tonewheel Organ Keyboard Controller
 
+<p align="center">
+  <img src="docs/pcb.png" alt="Controller PCB layout: Pico, two 74HC238 decoders, 74HC4067 pot mux, row/column headers and pot headers" width="100%">
+</p>
+
 A Raspberry Pi Pico (RP2040) keyboard/pot scanner for a tonewheel organ
 build. Reads a 12x8x2 contact matrix through two 74HC238 decoders, either as
 two independent non-velocity organ manuals or as one 96-key velocity-sensing
@@ -62,6 +66,11 @@ way, and what's still unverified on real hardware.
 
 One fixed custom PCB, no board variants — all pins are set directly in
 `config.h`.
+
+<p align="center">
+  <img src="docs/board.jpg" alt="The built controller on its plywood base, ribbon-cabled to the organ keybeds" width="80%"><br>
+  <em>The built controller, mounted on plywood and ribbon-cabled to the keybeds.</em>
+</p>
 
 | Function | GPIO(s) | Notes |
 |---|---|---|
@@ -179,7 +188,7 @@ Type a single character into the CDC serial terminal — no Enter needed.
 | Key | Action |
 |---|---|
 | `m` | Toggle keyboard mode (DoubleManual <-> Velocity) |
-| `s` | Dump current status (mode, USB state, last note, manual/velocity config) |
+| `s` | Dump current status (mode, USB state, last note, manual/velocity config, and the full `ccMap` per mux channel — check this if CC output doesn't match what you expect from a recent code change) |
 | `z` | MIDI panic — all sound/notes off, all channels, both outputs |
 | `p` | Toggle a raw CC-pot CSV stream: all 16 ADC readings (0-4095, unfiltered), one comma-separated line every ~50ms — feed straight into Arduino Serial Plotter or any CSV-over-serial script |
 | `k` | Toggle a raw key-matrix stream: 16 columns x 12-row bitmap, hex, one line every ~100ms, bypasses debounce entirely — useful for verifying physical row/column mapping against real key presses |
@@ -194,6 +203,9 @@ picoKeyboard/
 ├── platformio.ini
 ├── README.md                       This file
 ├── context.md                      Hardware assumptions, decisions, bring-up log
+├── docs/
+│   ├── pcb.png                     PCB layout render (README hero image)
+│   └── board.jpg                   Photo of the built controller
 └── src/
     ├── main.cpp                    setup()/loop() (core0) · setup1()/loop1() (core1) ·
     │                                 I2C recovery · serial debug commands

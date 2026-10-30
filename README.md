@@ -4,12 +4,12 @@
   <img src="docs/pcb.png" alt="Controller PCB layout: Pico, two 74HC238 decoders, 74HC4067 pot mux, row/column headers and pot headers" width="100%">
 </p>
 
-A Raspberry Pi Pico (RP2040) keyboard/pot scanner for a tonewheel organ
+A Raspberry Pi Pico (RP2040) keyboard/pot scanner for a [tonewheel organ](https://github.com/edwindertien/picotonewheel)
 build. Reads a 12x8x2 contact matrix through two 74HC238 decoders, either as
 two independent non-velocity organ manuals or as one 96-key velocity-sensing
 manual, plus 16 analog CC pots (drawbars, volume, drive, chorus, ...) through
 a 74HC4067. Outputs USB MIDI, a USB CDC debug port, and a hardware MIDI DIN
-line simultaneously.
+line simultaneously. The board has been designed by [nlhans](https://github.com/nlhans/picokeymatrix), this repository contains the firmware.
 
 Built on the same PlatformIO/Earlephilhower toolchain and several reused
 driver patterns from the picoST3215 servo-tester project. See
